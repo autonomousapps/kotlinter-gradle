@@ -5,26 +5,21 @@ import com.github.shyiko.ktlint.core.LintError
 import com.github.shyiko.ktlint.core.RuleSet
 import org.gradle.api.GradleException
 import org.gradle.api.logging.LogLevel
-import org.gradle.api.tasks.CacheableTask
-import org.gradle.api.tasks.Input
-import org.gradle.api.tasks.InputFiles
-import org.gradle.api.tasks.Internal
-import org.gradle.api.tasks.OutputFiles
-import org.gradle.api.tasks.PathSensitive
-import org.gradle.api.tasks.PathSensitivity
-import org.gradle.api.tasks.SourceTask
-import org.gradle.api.tasks.TaskAction
+import org.gradle.api.logging.Logging
+import org.gradle.api.tasks.*
+import org.gradle.workers.WorkerExecutor
 import org.jmailen.gradle.kotlinter.KotlinterExtension
 import org.jmailen.gradle.kotlinter.support.reporterFor
 import org.jmailen.gradle.kotlinter.support.resolveRuleSets
 import org.jmailen.gradle.kotlinter.support.userData
+import org.slf4j.LoggerFactory
 import java.io.File
+import javax.inject.Inject
 
 @CacheableTask
-open class LintTask : SourceTask() {
+open class LintTask @Inject constructor(private val workerExecutor: WorkerExecutor) : SourceTask() {
 
     @OutputFiles
-    @PathSensitive(PathSensitivity.RELATIVE)
     lateinit var reports: Map<String, File>
 
     @InputFiles
@@ -45,53 +40,84 @@ open class LintTask : SourceTask() {
 
     @TaskAction
     fun run() {
-        var hasErrors = false
+        val fileSet = source.files
+        workerExecutor.submit(Work::class.java) {
+
+            it.params(
+                    name,
+                    indentSize,
+                    continuationIndentSize,
+                    reports,
+                    project.projectDir,
+                    fileSet,
+                    ignoreFailures
+            )
+        }
+    }
+}
+class Work @Inject constructor(
+        private val taskName: String,
+        private val indentSize: Int,
+        private val continuationIndentSize: Int,
+        private val reports: Map<String, File>,
+        private val projectDir: File,
+        private val source: Set<File>,
+        private val ignoreFailures: Boolean
+): Runnable {
+
+    override fun run() {
+        val logger = LoggerFactory.getLogger(javaClass)
+
         val fileReporters = reports.map { (reporter, report) ->
             reporterFor(reporter, report)
         }
+        fileReporters.forEach { it.beforeAll() }
 
-        fileReporters.onEach { it.beforeAll() }
+        var hasErrors = false
+        source.forEach { sourceFile ->
+            val relativePath = sourceFile.toRelativeString(projectDir)
+            fileReporters.forEach { it.before(relativePath) }
+            logger.debug("$taskName linting: $relativePath")
+            println("$taskName linting: $relativePath")
 
-        getSource().forEach { file ->
-            val relativePath = file.toRelativeString(project.projectDir)
-            fileReporters.onEach { it.before(relativePath) }
-            logger.log(LogLevel.DEBUG, "$name linting: $relativePath")
-
-            val lintFunc = when (file.extension) {
+            val lintFunc = when (sourceFile.extension) {
                 "kt" -> this::lintKt
                 "kts" -> this::lintKts
                 else -> {
-                    logger.log(LogLevel.DEBUG, "$name ignoring non Kotlin file: $relativePath")
+                    logger.debug("$taskName ignoring non Kotlin file: $relativePath")
+                    println("$taskName ignoring non Kotlin file: $relativePath")
                     null
                 }
             }
 
-            lintFunc?.invoke(file, resolveRuleSets()) { error ->
-                fileReporters.onEach { it.onLintError(relativePath, error, false) }
+            lintFunc?.invoke(sourceFile, resolveRuleSets()) { error ->
+                fileReporters.forEach { it.onLintError(relativePath, error, false) }
 
                 val errorStr = "$relativePath:${error.line}:${error.col}: ${error.detail}"
-                logger.log(LogLevel.QUIET, "Lint error > $errorStr")
+                logger.info("Lint error > $errorStr")
+                println("Lint error > $errorStr")
 
                 hasErrors = true
             }
 
-            fileReporters.onEach { it.after(relativePath) }
+            fileReporters.forEach { it.after(relativePath) }
         }
+        fileReporters.forEach { it.afterAll() }
 
-        fileReporters.onEach { it.afterAll() }
         if (hasErrors && !ignoreFailures) {
             throw GradleException("Kotlin source failed lint check.")
         }
+        throw RuntimeException("source size = ${source.size}")
     }
 
     private fun lintKt(file: File, ruleSets: List<RuleSet>, onError: (error: LintError) -> Unit) =
             KtLint.lint(
-                    file.readText(),
+                    file.readText().also { println("text: $it") },
                     ruleSets,
                     userData(
-                        indentSize = indentSize,
-                        continuationIndentSize = continuationIndentSize,
-                        filePath = file.path
+                            indentSize = indentSize,
+                            continuationIndentSize = continuationIndentSize,
+                            filePath = file.path
                     ), onError)
 
     private fun lintKts(file: File, ruleSets: List<RuleSet>, onError: (error: LintError) -> Unit) =
@@ -99,8 +125,8 @@ open class LintTask : SourceTask() {
                     file.readText(),
                     ruleSets,
                     userData(
-                        indentSize = indentSize,
-                        continuationIndentSize = continuationIndentSize,
-                        filePath = file.path
+                            indentSize = indentSize,
+                            continuationIndentSize = continuationIndentSize,
+                            filePath = file.path
                     ), onError)
 }
