@@ -36,7 +36,7 @@ class FunctionalTest {
         val className = "KotlinClass"
         kotlinSourceFile("$className.kt", """
             class $className {
-                private fun(){
+                private fun hi(){
                     println ("hi")
                 }
             }
@@ -60,7 +60,7 @@ class FunctionalTest {
         buildFile()
         kotlinSourceFile("KotlinClass.kt", """
             class KotlinClass {
-                private fun() {
+                private fun hi() {
                     println("hi")
                 }
             }
@@ -69,7 +69,7 @@ class FunctionalTest {
 
         val result: BuildResult = GradleRunner.create()
                 .withProjectDir(testProjectDir.root)
-                .withArguments("lintKotlinMain")
+                .withArguments("lintKotlinMain", "--stacktrace")
                 .withPluginClasspath()
                 .build()
 
